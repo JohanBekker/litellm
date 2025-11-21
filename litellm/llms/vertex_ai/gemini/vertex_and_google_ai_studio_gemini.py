@@ -31,6 +31,9 @@ from litellm.constants import (
     DEFAULT_REASONING_EFFORT_LOW_THINKING_BUDGET,
     DEFAULT_REASONING_EFFORT_MEDIUM_THINKING_BUDGET,
 )
+from litellm.litellm_core_utils.prompt_templates.factory import (
+    _encode_tool_call_id_with_signature,
+)
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
 from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
@@ -42,6 +45,7 @@ from litellm.types.llms.gemini import BidiGenerateContentServerMessage
 from litellm.types.llms.openai import (
     AllMessageValues,
     ChatCompletionResponseMessage,
+    ChatCompletionThinkingBlock,
     ChatCompletionToolCallChunk,
     ChatCompletionToolCallFunctionChunk,
     ChatCompletionToolParamFunctionChunk,
@@ -205,6 +209,21 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
     @classmethod
     def get_config(cls):
         return super().get_config()
+
+    @staticmethod
+    def _is_gemini_3_or_newer(model: str) -> bool:
+        """
+        Check if the model is Gemini 3 Pro or newer.
+
+        Gemini 3 models include:
+        - gemini-3-pro-preview
+        - Any future Gemini 3.x models
+        """
+        # Check for Gemini 3 models
+        if "gemini-3" in model:
+            return True
+
+        return False
 
     def get_supported_openai_params(self, model: str) -> List[str]:
         supported_params = [
@@ -747,6 +766,22 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
         return content_str, reasoning_content_str
 
+    def _extract_thinking_blocks_from_parts(self, parts: List[HttpxPartType]) -> List[ChatCompletionThinkingBlock]:
+        """Extract thinking blocks from parts if present"""
+        thinking_blocks: List[ChatCompletionThinkingBlock] = []
+        for part in parts:
+            if "thoughtSignature" in part:
+                part_copy = part.copy()
+                part_copy.pop("thoughtSignature")
+                thinking_blocks.append(
+                    ChatCompletionThinkingBlock(
+                        type="thinking",
+                        thinking=json.dumps(part_copy),
+                        signature=part["thoughtSignature"],
+                    )
+                )
+        return thinking_blocks
+
     def _extract_audio_response_from_parts(self, parts: List[HttpxPartType]) -> Optional[ChatCompletionAudioResponse]:
         """Extract audio response from parts if present"""
         for part in parts:
@@ -800,15 +835,26 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                     name=part["functionCall"]["name"],
                     arguments=json.dumps(part["functionCall"]["args"]),
                 )
+                # Extract thought signature if present
+                thought_signature = part.get("thoughtSignature")
+
                 if is_function_call is True:
                     function = _function_chunk
                 else:
-                    _tool_response_chunk = ChatCompletionToolCallChunk(
-                        id=f"call_{uuid.uuid4().hex[:28]}",
-                        type="function",
-                        function=_function_chunk,
-                        index=cumulative_tool_call_idx,
-                    )
+                    _tool_response_chunk: ChatCompletionToolCallChunk = {
+                        "id": f"call_{uuid.uuid4().hex[:28]}",
+                        "type": "function",
+                        "function": _function_chunk,
+                        "index": cumulative_tool_call_idx,
+                    }
+                    # Embed thought signature in ID for OpenAI client compatibility
+                    if thought_signature:
+                        _tool_response_chunk["id"] = _encode_tool_call_id_with_signature(
+                            _tool_response_chunk["id"], thought_signature
+                        )
+                        _tool_response_chunk["provider_specific_fields"] = {  # type: ignore
+                            "thought_signature": thought_signature
+                        }
                     _tools.append(_tool_response_chunk)
                 cumulative_tool_call_idx += 1
         if len(_tools) == 0:
@@ -1042,6 +1088,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         chat_completion_logprobs: Optional[ChoiceLogprobs] = None
         tools: Optional[List[ChatCompletionToolCallChunk]] = []
         functions: Optional[ChatCompletionToolCallFunctionChunk] = None
+        thinking_blocks: Optional[List[ChatCompletionThinkingBlock]] = None
         cumulative_tool_call_index: int = 0
 
         for idx, candidate in enumerate(_candidates):
@@ -1072,6 +1119,8 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
                 audio_response = VertexGeminiConfig()._extract_audio_response_from_parts(parts=candidate["content"]["parts"])
 
+                thinking_blocks = VertexGeminiConfig()._extract_thinking_blocks_from_parts(parts=candidate["content"]["parts"])
+
                 if audio_response is not None:
                     cast(Dict[str, Any], chat_completion_message)["audio"] = audio_response
                     chat_completion_message["content"] = None  # OpenAI spec
@@ -1095,6 +1144,22 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
             if functions is not None:
                 chat_completion_message["function_call"] = functions
+
+            if thinking_blocks is not None:
+                chat_completion_message["thinking_blocks"] = thinking_blocks  # type: ignore
+
+                # Convert thinking_blocks to reasoning_content for streaming
+                # This ensures reasoning_content is available in streaming responses
+                if isinstance(model_response, ModelResponseStream) and reasoning_content is None:
+                    reasoning_content_parts = []
+                    for block in thinking_blocks:
+                        thinking_text = block.get("thinking")
+                        if thinking_text:
+                            reasoning_content_parts.append(thinking_text)
+
+                    if reasoning_content_parts:
+                        reasoning_content = "\n".join(reasoning_content_parts)
+                        chat_completion_message["reasoning_content"] = reasoning_content
 
             if isinstance(model_response, ModelResponseStream):
                 from litellm.types.utils import Delta, StreamingChoices
