@@ -1092,6 +1092,9 @@ openaiOSeriesConfig = OpenAIOSeriesConfig()
 from .llms.openai.chat.gpt_transformation import (
     OpenAIGPTConfig,
 )
+from .llms.openai.chat.gpt_5_transformation import (
+    OpenAIGPT5Config,
+)
 from .llms.openai.transcriptions.whisper_transformation import (
     OpenAIWhisperAudioTranscriptionConfig,
 )
@@ -1105,6 +1108,9 @@ from .llms.openai.chat.gpt_audio_transformation import (
 )
 
 openAIGPTAudioConfig = OpenAIGPTAudioConfig()
+
+openAIGPT5Config = OpenAIGPT5Config()
+
 
 from .llms.nvidia_nim.chat.transformation import NvidiaNimConfig
 from .llms.nvidia_nim.embed import NvidiaNimEmbeddingConfig
