@@ -782,12 +782,20 @@ class LangFuseLogger:
                     )
                     total_tokens = getattr(_usage_obj, "total_tokens", None) or 0
 
-                    cache_creation_input_tokens = (
-                        _usage_obj.get("cache_creation_input_tokens") or 0
-                    )
-                    cache_read_input_tokens = _extract_cache_read_input_tokens(
-                        _usage_obj
-                    )
+                    if hasattr(_usage_obj, "get"):
+                        cache_creation_input_tokens = (
+                            _usage_obj.get("cache_creation_input_tokens") or 0
+                        )
+                        cache_read_input_tokens = _extract_cache_read_input_tokens(
+                            _usage_obj
+                        )
+                    else:
+                        cache_creation_input_tokens = (
+                            getattr(_usage_obj, "cache_creation_input_tokens", None) or 0
+                        )
+                        cache_read_input_tokens = (
+                            getattr(_usage_obj, "cache_read_input_tokens", None) or 0
+                        )
 
                     usage = {
                         "prompt_tokens": prompt_tokens,
